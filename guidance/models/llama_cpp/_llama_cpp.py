@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class _LlamaBatchContext:
     def __init__(self, n_batch, n_ctx):
         self._llama_batch_free = llama_cpp.llama_batch_free
-        self.batch = llama_cpp.llama_batch_init(n_tokens=n_batch, embd=0, n_seq_max=n_ctx)
+        self.batch = llama_cpp.llama_batch_init(n_batch, 0, n_ctx)
         if self.batch is None:
             raise Exception("call to llama_cpp.llama_batch_init returned NULL.")
 
@@ -73,26 +73,27 @@ class LlamaCpp(Model):
 
         self._context = _LlamaBatchContext(self.model_obj.n_batch, self.model_obj.n_ctx())
 
+        # TODO: Is `tokenizer` needed?
         if tokenizer is None:
             tokenizer = llama_cpp.LlamaTokenizer(self.model_obj)
         elif not isinstance(tokenizer, llama_cpp.LlamaTokenizer):
             raise TypeError("tokenizer must be None or a llama_cpp.LlamaTokenizer object.")
         self._orig_tokenizer = tokenizer
 
-        self._n_vocab = tokenizer.llama.n_vocab()
+        self._n_vocab = self.model_obj.n_vocab()
         self.caching = caching
         self.temperature = temperature
 
         tokens = []
         for i in range(self._n_vocab):
-            tok = tokenizer.llama.detokenize([i]) # note that detokenize returns bytes directly
+            tok = self.model_obj.detokenize([i]) # note that detokenize returns bytes directly
             if tok == b'':
                 tok = llama_cpp.llama_token_get_text(self.model_obj.model, i) # get text rep of special tokens
             tokens.append(tok)
         super().__init__(
             tokens,
-            tokenizer.llama.token_bos(),
-            tokenizer.llama.token_eos(),
+            self.model_obj.token_bos(),
+            self.model_obj.token_eos(),
             echo=echo,
             compute_log_probs=compute_log_probs
         )
