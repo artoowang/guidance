@@ -5,6 +5,7 @@ import operator
 import sys
 import logging
 import numpy as np
+import time
 
 from .._model import Model, Chat
 from ..._utils import normalize_notebook_stdout_stderr
@@ -33,6 +34,10 @@ class _LlamaBatchContext:
             llama_batch_free(batch)
 
 class LlamaCpp(Model):
+
+    # This is going to be cleared to 0 by Model.__call__() for each yield.
+    _llama_cpp_seconds_per_yield : float = 0
+
     def __init__(self, model=None, tokenizer=None, echo=True, compute_log_probs=False, caching=True, temperature=0.0, **kwargs):
         '''Build a new LlamaCpp model object that represents a model in a given state.'''
         if not is_llama_cpp:
@@ -129,7 +134,9 @@ class LlamaCpp(Model):
         self._cache_state["cache_token_ids"] = token_ids.copy()
 
         # clear obsolete parts of kv cache
+        start_seconds = time.perf_counter()
         llama_cpp.llama_kv_cache_seq_rm(self.model_obj.ctx, -1, num_cached, -1)
+        self._llama_cpp_seconds_per_yield += time.perf_counter() - start_seconds
 
         # eval the model
         n_batch = self.model_obj.n_batch
@@ -147,12 +154,16 @@ class LlamaCpp(Model):
             if i + n_tokens == len(token_ids):
                 batch.logits[n_tokens - 1] = True
 
+            start_seconds = time.perf_counter()
             ret = llama_cpp.llama_decode(self.model_obj.ctx, batch)
+            self._llama_cpp_seconds_per_yield += time.perf_counter() - start_seconds
             if ret != 0:
                 raise Exception(f"Call to llama_cpp.llama_decode returned {ret}.")
 
         # get the logits
+        start_seconds = time.perf_counter()
         logits = llama_cpp.llama_get_logits(self.model_obj.ctx)
+        self._llama_cpp_seconds_per_yield += time.perf_counter() - start_seconds
         logits = logits[(n_tokens - 1) * self._n_vocab : n_tokens * self._n_vocab]
         logits = np.ctypeslib.as_array(logits, shape=(self._n_vocab,)).copy()
 

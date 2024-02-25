@@ -47,6 +47,9 @@ class Model:
     _grammar_only = 0 # a flag that tracks when we are forced to be executing only compiled grammars (like when we are inside a select)
     _throttle_refresh = 0 # a flag that tracks when we can throttle our display since we know future display calls are going to happen
 
+    # Timing info.
+    _timing_stats : dict = {}
+
     def __init__(self, tokens, bos_token_id=None, eos_token_id=None, echo=True, compute_log_probs=False):
         '''Build a new model object that represents a model in a given state.
         
@@ -83,6 +86,15 @@ class Model:
         self._event_queue = None # TODO: these are for streaming results in code, but that needs implemented
         self._event_parent = None
         self._last_display = 0 # used to track the last display call to enable throttling
+
+        # Timing info.
+        self._timing_stats = {
+            'num_tokens_generated': 0,
+            'total_token_generation_seconds': 0,
+            'total_get_logits_seconds': 0,
+            # TODO: currently this does not really include all calls to llama_cpp.
+            'total_llama_cpp_seconds': 0, 
+        }
 
         # build a prefix tree of the tokens
         self._token_trie = cpp.ByteTrie(tokens, np.arange(len(tokens)))
@@ -150,7 +162,10 @@ class Model:
         new_lm._variables = self._variables.copy()
         new_lm._variables_log_probs = self._variables_log_probs.copy()
         new_lm.opened_blocks = self.opened_blocks.copy()
-        
+
+        # Copy the timing info.
+        new_lm._timing_stats = self._timing_stats.copy()
+
         # create a new clean event queue # TODO: can we delete this now?
         new_lm._event_queue = None
         if self._event_queue is not None:
@@ -462,7 +477,7 @@ class Model:
 
             delayed_bytes = b""
             # last_is_generated = False
-            for new_bytes, is_generated, new_bytes_prob, capture_groups, capture_group_log_probs, new_token_count in gen_obj:
+            for new_bytes, is_generated, new_bytes_prob, capture_groups, capture_group_log_probs, new_token_count, yield_timing in gen_obj:
 
                 # we make everything full probability if we are not computing uncertainty
                 if not lm.compute_log_probs:
@@ -477,6 +492,12 @@ class Model:
                     delayed_bytes = new_bytes
                     continue
                 delayed_bytes = b""
+
+                if yield_timing is not None:
+                    lm._timing_stats['num_tokens_generated'] += yield_timing['num_tokens_generated']
+                    lm._timing_stats['total_token_generation_seconds'] += yield_timing['token_generation_seconds']
+                    lm._timing_stats['total_get_logits_seconds'] += yield_timing['get_logits_seconds']
+                    lm._timing_stats['total_llama_cpp_seconds'] += yield_timing['llama_cpp_seconds']
 
                 if len(new_bytes) > 0:
                     generated_value += new_text
@@ -656,7 +677,15 @@ class Model:
         was_forced = False
         captured_data = {}
         captured_log_prob_data = {}
+        # If the underlying model is LlamaCpp, we also collects relevant timing info.
+        is_llama_cpp = hasattr(self, "_llama_cpp_seconds_per_yield")
         while True: # each iteration generates one more token (and some of the associated bytes)
+            yield_timing = {}
+            if is_llama_cpp:
+                # This timing is going to be accumulated by LlamaCpp.
+                self._llama_cpp_seconds_per_yield = 0
+            yield_timing['llama_cpp_seconds'] = 0
+            token_generation_start_seconds = time.perf_counter()
 
             # enforce the token limit
             if token_count >= max_tokens:
@@ -782,7 +811,10 @@ class Model:
                     was_forced = False
                 grammar_temp = parser.next_byte_temperature()
                 current_temp = grammar_temp if grammar_temp >= 0 else temperature # we prefer to use the grammar temp when it is specified
+                get_logits_start_seconds = time.perf_counter()
                 logits = self._get_logits(token_ids, parser.bytes[start_pos:forced_pos], current_temp)
+                yield_timing['get_logits_seconds'] = time.perf_counter() - get_logits_start_seconds
+                yield_timing['num_tokens_generated'] = 1
                 is_generated = True
 
                 # if requested we compute the log probabilities so we can track the probabilities of each node
@@ -944,7 +976,9 @@ class Model:
                 _record_captures(parse_tree, captured_data, captured_log_prob_data, parser.bytes)
                 
                 # we have no valid log prob data if we didn't compute it
-                yield new_bytes[hidden_count:], is_generated, new_bytes_prob, captured_data, captured_log_prob_data, token_count - last_token_count
+                # TODO: Do we reach here when is_generated is True? If so, we need to calculate yield_timing.
+                assert not is_generated, "Incorrectly assumed is_generated is always False in this code path."
+                yield new_bytes[hidden_count:], is_generated, new_bytes_prob, captured_data, captured_log_prob_data, token_count - last_token_count, None
                 last_token_count = token_count
                 break # we are done!
             else:
@@ -953,7 +987,15 @@ class Model:
                 # yeild the snippet of text created by the next token
                 out = new_bytes[hidden_count:]
                 if len(out) > 0:
-                    yield out, is_generated, new_bytes_prob, {}, {}, token_count - last_token_count # note that we don't capture groups until a complete parse right now...
+                    # Only produce `yield_timing` if the token is generated.
+                    if is_generated:
+                        yield_timing['token_generation_seconds'] = time.perf_counter() - token_generation_start_seconds
+                        if is_llama_cpp:
+                            yield_timing['llama_cpp_seconds'] = self._llama_cpp_seconds_per_yield
+                        out_yield_timing = yield_timing
+                    else:
+                        out_yield_timing = None
+                    yield out, is_generated, new_bytes_prob, {}, {}, token_count - last_token_count, out_yield_timing # note that we don't capture groups until a complete parse right now...
                     last_token_count = token_count
                     hidden_count = 0
                     token_count += 1 # note we only update this for tokens that emit non-hidden content
