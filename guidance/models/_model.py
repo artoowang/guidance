@@ -974,11 +974,18 @@ class Model:
                 # capture the named groups from the parse tree
                 parse_tree = parser.parse_tree()
                 _record_captures(parse_tree, captured_data, captured_log_prob_data, parser.bytes)
+
+                # Calculates `yield_timing` if a token is generated.
+                if is_generated:
+                    yield_timing['token_generation_seconds'] = time.perf_counter() - token_generation_start_seconds
+                    if is_llama_cpp:
+                        yield_timing['llama_cpp_seconds'] = self._llama_cpp_seconds_per_yield
+                    out_yield_timing = yield_timing
+                else:
+                    out_yield_timing = None
                 
                 # we have no valid log prob data if we didn't compute it
-                # TODO: Do we reach here when is_generated is True? If so, we need to calculate yield_timing.
-                assert not is_generated, "Incorrectly assumed is_generated is always False in this code path."
-                yield new_bytes[hidden_count:], is_generated, new_bytes_prob, captured_data, captured_log_prob_data, token_count - last_token_count, None
+                yield new_bytes[hidden_count:], is_generated, new_bytes_prob, captured_data, captured_log_prob_data, token_count - last_token_count, out_yield_timing
                 last_token_count = token_count
                 break # we are done!
             else:
