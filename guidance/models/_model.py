@@ -679,12 +679,17 @@ class Model:
         captured_log_prob_data = {}
         # If the underlying model is LlamaCpp, we also collects relevant timing info.
         is_llama_cpp = hasattr(self, "_llama_cpp_seconds_per_yield")
+
+        # Reset yield timing info: the following info is going to be collected
+        # over all operations that lead to a yield, and get reset.
+        yield_timing = {
+            'llama_cpp_seconds': 0,
+        }
+        if is_llama_cpp:
+            # This timing is going to be accumulated by LlamaCpp.
+            self._llama_cpp_seconds_per_yield = 0
+
         while True: # each iteration generates one more token (and some of the associated bytes)
-            yield_timing = {}
-            if is_llama_cpp:
-                # This timing is going to be accumulated by LlamaCpp.
-                self._llama_cpp_seconds_per_yield = 0
-            yield_timing['llama_cpp_seconds'] = 0
             token_generation_start_seconds = time.perf_counter()
 
             # enforce the token limit
@@ -980,7 +985,11 @@ class Model:
                     yield_timing['token_generation_seconds'] = time.perf_counter() - token_generation_start_seconds
                     if is_llama_cpp:
                         yield_timing['llama_cpp_seconds'] = self._llama_cpp_seconds_per_yield
+                        self._llama_cpp_seconds_per_yield = 0
                     out_yield_timing = yield_timing
+                    yield_timing = {
+                        'llama_cpp_seconds': 0,
+                    }
                 else:
                     out_yield_timing = None
                 
@@ -999,7 +1008,11 @@ class Model:
                         yield_timing['token_generation_seconds'] = time.perf_counter() - token_generation_start_seconds
                         if is_llama_cpp:
                             yield_timing['llama_cpp_seconds'] = self._llama_cpp_seconds_per_yield
+                            self._llama_cpp_seconds_per_yield = 0
                         out_yield_timing = yield_timing
+                        yield_timing = {
+                            'llama_cpp_seconds': 0,
+                        }
                     else:
                         out_yield_timing = None
                     yield out, is_generated, new_bytes_prob, {}, {}, token_count - last_token_count, out_yield_timing # note that we don't capture groups until a complete parse right now...
